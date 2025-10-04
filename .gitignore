@@ -1,0 +1,41 @@
+# Hassas bilgiler
+.env
+*.pem
+*.key
+
+# Node modules
+node_modules/
+
+# Hardhat dosyaları
+cache/
+artifacts/
+
+# Test dosyaları
+test/
+scripts/
+
+# OS dosyaları
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE dosyaları
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Deployment dosyaları (opsiyonel)
+deployments/
