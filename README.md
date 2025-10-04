@@ -1,132 +1,59 @@
-# Lydia Spot Token Contract
+# Lydia Spot Token
 
-Bu proje, Pyth Network oracle entegrasyonu ile spot token alım/satımı için geliştirilmiş bir Ethereum smart contract'ıdır.
+An ERC20 token smart contract with integrated Pyth Network oracle for spot trading with USDC.
 
-## Özellikler
+## Overview
 
-- ✅ USDC ile token alım/satımı
-- ✅ Pyth Network fiyat oracle entegrasyonu
-- ✅ Admin imzası ile işlem doğrulama
-- ✅ Token mint/burn mekanizması
-- ✅ %5 fiyat sapma koruması
-- ✅ Reentrancy koruması
-- ✅ Ownable ve güvenlik kontrolleri
+LydiaSpotToken is a Solidity smart contract that enables users to buy and sell tokens using USDC with real-time price feeds from Pyth Network. All transactions require admin signature verification for enhanced security.
 
-## Kurulum
+## Key Features
 
-```bash
-# Bağımlılıkları yükle
-npm install
+- **Token Trading**: Buy tokens with USDC, sell tokens for USDC
+- **Pyth Oracle Integration**: Real-time price feeds with 5% deviation protection
+- **Admin Signature Verification**: All trades must be authorized by admin signature
+- **Nonce System**: Replay attack prevention
+- **Reentrancy Protection**: Secure against reentrancy attacks
+- **Mint/Burn Mechanism**: Dynamic supply based on trading activity
 
-# Kontratları compile et
-npm run compile
+## Architecture
 
-# Testleri çalıştır
-npm run test
+### Core Functions
 
-# Deploy et
-npm run deploy:testnet
-```
+**buyTokens**: Purchase tokens by depositing USDC
+- Validates admin signature
+- Verifies Pyth price feed against provided token price
+- Mints new tokens to buyer
+- Transfers USDC from buyer to contract
 
-## Konfigürasyon
+**sellTokens**: Sell tokens to receive USDC
+- Validates admin signature
+- Verifies Pyth price feed against provided token price
+- Burns tokens from seller
+- Transfers USDC from contract to seller
 
-1. `.env` dosyasını oluştur:
-```bash
-cp .env.example .env
-```
+### Security Mechanisms
 
-2. Gerekli değerleri doldur:
-- `PRIVATE_KEY`: Deploy için private key
-- `ADMIN_WALLET`: İmza kontrolü için admin cüzdan adresi
-- `TOKEN_PRICE_FEED_ID`: Pyth Network price feed ID
+- **Signature Verification**: EIP-191 compliant message signatures
+- **Price Validation**: Maximum 5% deviation between oracle and provided price
+- **Nonce Tracking**: Single-use nonces prevent transaction replay
+- **Access Control**: Ownable pattern for privileged operations
+- **Reentrancy Guard**: Protection on all state-changing functions
 
-## Contract Adresleri
+## Technical Specifications
 
-### Pyth Network Contract Adresleri:
-- **Ethereum**: `0x4305FB66699C3B2702D4d05CF36551390A4c69C6`
-- **Arbitrum**: `0xff1a0f4744e8582DF1aE09D5611b887B6a12925C`
-- **Polygon**: `0xff1a0f4744e8582DF1aE09D5611b887B6a12925C`
-- **BSC**: `0x4D7E825f80bDf85e913E0DD2A2D54927e9dE1594`
+- **Solidity Version**: 0.8.19
+- **Token Standard**: ERC20
+- **Oracle**: Pyth Network
+- **Payment Token**: USDC (6 decimals)
+- **Token Decimals**: 18
+- **Price Decimals**: 8
 
-### USDC Contract Adresleri:
-- **Ethereum**: `0xA0b86a33E6441c1e6D8b86c3ff1C6E9cfFfDc8b4`
-- **Arbitrum**: `0xaf88d065e77c8cC2239327C5EDb3A432268e5831`
-- **Polygon**: `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`
-- **BSC**: `0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d`
+## Dependencies
 
-## Kullanım
+- OpenZeppelin Contracts v4.9.3
+- Pyth SDK Solidity v2.2.0
+- Hardhat Development Environment
 
-### Token Alımı (Buy)
-
-```solidity
-function buyTokens(
-    uint256 usdcAmount,      // USDC miktarı (6 decimal)
-    uint256 tokenPrice,      // Token fiyatı (8 decimal)
-    bytes32 nonce,           // Tek kullanımlık nonce
-    bytes memory adminSignature, // Admin imzası
-    bytes[] calldata priceUpdateData // Pyth price update data
-) external payable
-```
-
-### Token Satımı (Sell)
-
-```solidity
-function sellTokens(
-    uint256 tokenAmount,     // Token miktarı (18 decimal)
-    uint256 tokenPrice,      // Token fiyatı (8 decimal)
-    bytes32 nonce,           // Tek kullanımlık nonce
-    bytes memory adminSignature, // Admin imzası
-    bytes[] calldata priceUpdateData // Pyth price update data
-) external payable
-```
-
-## İmza Oluşturma
-
-Admin imzası oluşturmak için:
-
-```javascript
-const messageHash = ethers.utils.keccak256(
-    ethers.utils.solidityPack(
-        ["address", "bytes32", "uint256", "uint256"],
-        [userAddress, nonce, amount, price]
-    )
-);
-
-const signature = await adminWallet.signMessage(
-    ethers.utils.arrayify(messageHash)
-);
-```
-
-## Güvenlik
-
-- Tüm işlemler admin imzası gerektirir
-- Nonce sistemi ile replay attack korunması
-- Pyth oracle ile fiyat doğrulaması
-- %5 fiyat sapma limiti
-- Reentrancy guard
-- Access control (Ownable)
-
-## Test
-
-```bash
-npm run test
-npm run coverage
-```
-
-## Deploy
-
-```bash
-# Local testnet
-npm run node
-npm run deploy:localhost
-
-# Testnet
-npm run deploy:testnet
-
-# Mainnet
-npm run deploy:mainnet
-```
-
-## Lisans
+## License
 
 GPL-3.0
