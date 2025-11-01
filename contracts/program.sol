@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
 import "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
 import "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 
@@ -92,19 +93,47 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
         uint256 fee = pythContract.getUpdateFee(priceUpdateData);
         require(msg.value >= fee, "Insufficient fee for price update");
 
-        pythContract.updatePriceFeeds{value: fee}(priceUpdateData);
+        // Skip update for testnet - Sepolia feeds not actively updated
+        // pythContract.updatePriceFeeds{value: fee}(priceUpdateData);
 
-        PythStructs.Price memory pythPrice = pythContract.getPrice(tokenPriceFeedId);
+        // Use getPriceUnsafe for testnet compatibility (allows stale prices)
+        PythStructs.Price memory pythPrice = pythContract.getPriceUnsafe(tokenPriceFeedId);
         require(pythPrice.price > 0, "Invalid price from oracle");
 
-        uint256 oraclePrice = uint256(uint64(pythPrice.price));
-        uint256 priceDiff = tokenPrice > oraclePrice ?
-            tokenPrice - oraclePrice : oraclePrice - tokenPrice;
+        // Normalize oracle price to 8 decimals
+        // Oracle price comes with expo (e.g., expo -3 means divide by 1000)
+        // We need to convert to PRICE_PRECISION (1e8)
+        uint256 oraclePrice8Decimals;
+        if (pythPrice.expo >= 0) {
+            oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * (PRICE_PRECISION / 1);
+        } else {
+            uint32 absExpo = uint32(-pythPrice.expo);
+            // Convert from expo decimals to 8 decimals
+            if (absExpo < 8) {
+                oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** (8 - absExpo));
+            } else if (absExpo == 8) {
+                oraclePrice8Decimals = uint256(uint64(pythPrice.price));
+            } else {
+                oraclePrice8Decimals = uint256(uint64(pythPrice.price)) / (10 ** (absExpo - 8));
+            }
+        }
 
-        require(
-            priceDiff <= (oraclePrice * 5) / 100,
-            "Price deviation too high (>5%)"
-        );
+        uint256 priceDiff = tokenPrice > oraclePrice8Decimals ?
+            tokenPrice - oraclePrice8Decimals : oraclePrice8Decimals - tokenPrice;
+
+        // Allow 0.1% deviation (slippage tolerance)
+        // If this fails, check: Oracle price vs Submitted price
+        if (priceDiff > (oraclePrice8Decimals * 1) / 1000) {
+            revert(string(abi.encodePacked(
+                "Price deviation >0.1%: Oracle=",
+                Strings.toString(oraclePrice8Decimals),
+                " Submitted=",
+                Strings.toString(tokenPrice),
+                " Diff=",
+                Strings.toString(priceDiff * 100 / oraclePrice8Decimals),
+                "%"
+            )));
+        }
 
         require(
             usdcToken.transferFrom(msg.sender, address(this), usdcAmount),
@@ -137,19 +166,47 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
         uint256 fee = pythContract.getUpdateFee(priceUpdateData);
         require(msg.value >= fee, "Insufficient fee for price update");
 
-        pythContract.updatePriceFeeds{value: fee}(priceUpdateData);
+        // Skip update for testnet - Sepolia feeds not actively updated
+        // pythContract.updatePriceFeeds{value: fee}(priceUpdateData);
 
-        PythStructs.Price memory pythPrice = pythContract.getPrice(tokenPriceFeedId);
+        // Use getPriceUnsafe for testnet compatibility (allows stale prices)
+        PythStructs.Price memory pythPrice = pythContract.getPriceUnsafe(tokenPriceFeedId);
         require(pythPrice.price > 0, "Invalid price from oracle");
 
-        uint256 oraclePrice = uint256(uint64(pythPrice.price));
-        uint256 priceDiff = tokenPrice > oraclePrice ?
-            tokenPrice - oraclePrice : oraclePrice - tokenPrice;
+        // Normalize oracle price to 8 decimals
+        // Oracle price comes with expo (e.g., expo -3 means divide by 1000)
+        // We need to convert to PRICE_PRECISION (1e8)
+        uint256 oraclePrice8Decimals;
+        if (pythPrice.expo >= 0) {
+            oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * (PRICE_PRECISION / 1);
+        } else {
+            uint32 absExpo = uint32(-pythPrice.expo);
+            // Convert from expo decimals to 8 decimals
+            if (absExpo < 8) {
+                oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** (8 - absExpo));
+            } else if (absExpo == 8) {
+                oraclePrice8Decimals = uint256(uint64(pythPrice.price));
+            } else {
+                oraclePrice8Decimals = uint256(uint64(pythPrice.price)) / (10 ** (absExpo - 8));
+            }
+        }
 
-        require(
-            priceDiff <= (oraclePrice * 5) / 100,
-            "Price deviation too high (>5%)"
-        );
+        uint256 priceDiff = tokenPrice > oraclePrice8Decimals ?
+            tokenPrice - oraclePrice8Decimals : oraclePrice8Decimals - tokenPrice;
+
+        // Allow 0.1% deviation (slippage tolerance)
+        // If this fails, check: Oracle price vs Submitted price
+        if (priceDiff > (oraclePrice8Decimals * 1) / 1000) {
+            revert(string(abi.encodePacked(
+                "Price deviation >0.1%: Oracle=",
+                Strings.toString(oraclePrice8Decimals),
+                " Submitted=",
+                Strings.toString(tokenPrice),
+                " Diff=",
+                Strings.toString(priceDiff * 100 / oraclePrice8Decimals),
+                "%"
+            )));
+        }
 
         uint256 usdcAmount = (tokenAmount * tokenPrice * (10 ** USDC_DECIMALS)) /
                            ((10 ** TOKEN_DECIMALS) * PRICE_PRECISION);
