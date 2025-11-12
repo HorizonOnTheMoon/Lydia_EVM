@@ -22,8 +22,18 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
     uint256 public constant PRICE_PRECISION = 1e8;
     uint256 public constant TOKEN_DECIMALS = 18;
     uint256 public constant USDC_DECIMALS = 6;
+    uint256 public constant WITHDRAWAL_DELAY = 24 hours;
 
     mapping(bytes32 => bool) public usedNonces;
+
+    struct PendingWithdrawal {
+        address token;
+        uint256 amount;
+        uint256 unlockTime;
+        bool exists;
+    }
+
+    mapping(bytes32 => PendingWithdrawal) public pendingWithdrawals;
 
     event TokensPurchased(
         address indexed buyer,
@@ -43,6 +53,9 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
 
     event AdminWalletUpdated(address indexed oldAdmin, address indexed newAdmin);
     event PriceFeedUpdated(bytes32 indexed oldFeedId, bytes32 indexed newFeedId);
+    event WithdrawalRequested(bytes32 indexed withdrawalId, address indexed token, uint256 amount, uint256 unlockTime);
+    event WithdrawalExecuted(bytes32 indexed withdrawalId, address indexed token, uint256 amount);
+    event WithdrawalCancelled(bytes32 indexed withdrawalId);
 
     constructor(
         string memory _name,
@@ -52,6 +65,11 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
         address _adminWallet,
         bytes32 _tokenPriceFeedId
     ) ERC20(_name, _symbol) {
+        require(_pythContract != address(0), "Invalid Pyth contract address");
+        require(_usdcToken != address(0), "Invalid USDC token address");
+        require(_adminWallet != address(0), "Invalid admin wallet address");
+        require(_tokenPriceFeedId != bytes32(0), "Invalid price feed ID");
+
         pythContract = IPyth(_pythContract);
         usdcToken = IERC20(_usdcToken);
         adminWallet = _adminWallet;
@@ -59,6 +77,7 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
     }
 
     modifier validSignature(
+        bytes32 functionSelector,
         bytes32 nonce,
         uint256 amount,
         uint256 price,
@@ -66,10 +85,11 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
     ) {
         require(!usedNonces[nonce], "Nonce already used");
 
+        // Include function selector for domain separation
         bytes32 messageHash = keccak256(
             abi.encodePacked(
                 "\x19Ethereum Signed Message:\n32",
-                keccak256(abi.encodePacked(msg.sender, nonce, amount, price))
+                keccak256(abi.encodePacked(functionSelector, msg.sender, nonce, amount, price))
             )
         );
 
@@ -86,53 +106,62 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
         bytes32 nonce,
         bytes memory adminSignature,
         bytes[] calldata priceUpdateData
-    ) external payable nonReentrant validSignature(nonce, usdcAmount, tokenPrice, adminSignature) {
+    ) external payable nonReentrant validSignature(keccak256("buyTokens"), nonce, usdcAmount, tokenPrice, adminSignature) {
         require(usdcAmount > 0, "USDC amount must be positive");
         require(tokenPrice > 0, "Token price must be positive");
 
         uint256 fee = pythContract.getUpdateFee(priceUpdateData);
         require(msg.value >= fee, "Insufficient fee for price update");
 
-        // Skip update for testnet - Sepolia feeds not actively updated
-        // pythContract.updatePriceFeeds{value: fee}(priceUpdateData);
+        // Update price feeds to ensure fresh oracle price
+        pythContract.updatePriceFeeds{value: fee}(priceUpdateData);
 
-        // Use getPriceUnsafe for testnet compatibility (allows stale prices)
-        PythStructs.Price memory pythPrice = pythContract.getPriceUnsafe(tokenPriceFeedId);
+        // Use getPrice to ensure fresh price (will revert if stale)
+        PythStructs.Price memory pythPrice = pythContract.getPrice(tokenPriceFeedId);
         require(pythPrice.price > 0, "Invalid price from oracle");
 
-        // Normalize oracle price to 8 decimals
-        // Oracle price comes with expo (e.g., expo -3 means divide by 1000)
-        // We need to convert to PRICE_PRECISION (1e8)
-        uint256 oraclePrice8Decimals;
+        // Use cross-multiplication for slippage check to avoid precision loss
+        // Instead of normalizing both to 8 decimals and comparing, we compare:
+        // tokenPrice (8 decimals) vs pythPrice.price (with expo)
+        // Cross-multiply: tokenPrice * 10^(-expo) vs pythPrice.price * PRICE_PRECISION
+
+        uint256 scaledTokenPrice;
+        uint256 scaledOraclePrice;
+
         if (pythPrice.expo >= 0) {
-            oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * (PRICE_PRECISION / 1);
+            // Oracle price needs to be scaled up
+            scaledOraclePrice = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * PRICE_PRECISION;
+            scaledTokenPrice = tokenPrice;
         } else {
             uint32 absExpo = uint32(-pythPrice.expo);
-            // Convert from expo decimals to 8 decimals
-            if (absExpo < 8) {
-                oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** (8 - absExpo));
-            } else if (absExpo == 8) {
-                oraclePrice8Decimals = uint256(uint64(pythPrice.price));
-            } else {
-                oraclePrice8Decimals = uint256(uint64(pythPrice.price)) / (10 ** (absExpo - 8));
-            }
+            // Scale both to same denominator to avoid division
+            scaledOraclePrice = uint256(uint64(pythPrice.price)) * PRICE_PRECISION;
+            scaledTokenPrice = tokenPrice * (10 ** absExpo);
         }
 
-        uint256 priceDiff = tokenPrice > oraclePrice8Decimals ?
-            tokenPrice - oraclePrice8Decimals : oraclePrice8Decimals - tokenPrice;
+        // Calculate percentage difference using cross-multiplication
+        // |scaledTokenPrice - scaledOraclePrice| / scaledOraclePrice < 0.001 (0.1%)
+        uint256 priceDiff = scaledTokenPrice > scaledOraclePrice ?
+            scaledTokenPrice - scaledOraclePrice : scaledOraclePrice - scaledTokenPrice;
 
         // Allow 0.1% deviation (slippage tolerance)
-        // If this fails, check: Oracle price vs Submitted price
-        if (priceDiff > (oraclePrice8Decimals * 1) / 1000) {
+        if (priceDiff * 1000 > scaledOraclePrice) {
             revert(string(abi.encodePacked(
-                "Price deviation >0.1%: Oracle=",
-                Strings.toString(oraclePrice8Decimals),
-                " Submitted=",
-                Strings.toString(tokenPrice),
-                " Diff=",
-                Strings.toString(priceDiff * 100 / oraclePrice8Decimals),
+                "Price deviation >0.1%: Diff=",
+                Strings.toString(priceDiff * 100 / scaledOraclePrice),
                 "%"
             )));
+        }
+
+        // Now normalize oracle price to 8 decimals for final calculation
+        // Multiply first, then divide to preserve precision
+        uint256 oraclePrice8Decimals;
+        if (pythPrice.expo >= 0) {
+            oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * PRICE_PRECISION;
+        } else {
+            uint32 absExpo = uint32(-pythPrice.expo);
+            // For calculation, multiply first then divide to preserve precision
+            oraclePrice8Decimals = (uint256(uint64(pythPrice.price)) * PRICE_PRECISION) / (10 ** absExpo);
         }
 
         require(
@@ -140,8 +169,9 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
             "USDC transfer failed"
         );
 
+        // Use fresh oracle price for calculation, not user-provided tokenPrice
         uint256 tokenAmount = (usdcAmount * (10 ** TOKEN_DECIMALS) * PRICE_PRECISION) /
-                             (tokenPrice * (10 ** USDC_DECIMALS));
+                             (oraclePrice8Decimals * (10 ** USDC_DECIMALS));
 
         _mint(msg.sender, tokenAmount);
 
@@ -158,7 +188,7 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
         bytes32 nonce,
         bytes memory adminSignature,
         bytes[] calldata priceUpdateData
-    ) external payable nonReentrant validSignature(nonce, tokenAmount, tokenPrice, adminSignature) {
+    ) external payable nonReentrant validSignature(keccak256("sellTokens"), nonce, tokenAmount, tokenPrice, adminSignature) {
         require(tokenAmount > 0, "Token amount must be positive");
         require(tokenPrice > 0, "Token price must be positive");
         require(balanceOf(msg.sender) >= tokenAmount, "Insufficient token balance");
@@ -166,49 +196,59 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
         uint256 fee = pythContract.getUpdateFee(priceUpdateData);
         require(msg.value >= fee, "Insufficient fee for price update");
 
-        // Skip update for testnet - Sepolia feeds not actively updated
-        // pythContract.updatePriceFeeds{value: fee}(priceUpdateData);
+        // Update price feeds to ensure fresh oracle price
+        pythContract.updatePriceFeeds{value: fee}(priceUpdateData);
 
-        // Use getPriceUnsafe for testnet compatibility (allows stale prices)
-        PythStructs.Price memory pythPrice = pythContract.getPriceUnsafe(tokenPriceFeedId);
+        // Use getPrice to ensure fresh price (will revert if stale)
+        PythStructs.Price memory pythPrice = pythContract.getPrice(tokenPriceFeedId);
         require(pythPrice.price > 0, "Invalid price from oracle");
 
-        // Normalize oracle price to 8 decimals
-        // Oracle price comes with expo (e.g., expo -3 means divide by 1000)
-        // We need to convert to PRICE_PRECISION (1e8)
-        uint256 oraclePrice8Decimals;
+        // Use cross-multiplication for slippage check to avoid precision loss
+        // Instead of normalizing both to 8 decimals and comparing, we compare:
+        // tokenPrice (8 decimals) vs pythPrice.price (with expo)
+        // Cross-multiply: tokenPrice * 10^(-expo) vs pythPrice.price * PRICE_PRECISION
+
+        uint256 scaledTokenPrice;
+        uint256 scaledOraclePrice;
+
         if (pythPrice.expo >= 0) {
-            oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * (PRICE_PRECISION / 1);
+            // Oracle price needs to be scaled up
+            scaledOraclePrice = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * PRICE_PRECISION;
+            scaledTokenPrice = tokenPrice;
         } else {
             uint32 absExpo = uint32(-pythPrice.expo);
-            // Convert from expo decimals to 8 decimals
-            if (absExpo < 8) {
-                oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** (8 - absExpo));
-            } else if (absExpo == 8) {
-                oraclePrice8Decimals = uint256(uint64(pythPrice.price));
-            } else {
-                oraclePrice8Decimals = uint256(uint64(pythPrice.price)) / (10 ** (absExpo - 8));
-            }
+            // Scale both to same denominator to avoid division
+            scaledOraclePrice = uint256(uint64(pythPrice.price)) * PRICE_PRECISION;
+            scaledTokenPrice = tokenPrice * (10 ** absExpo);
         }
 
-        uint256 priceDiff = tokenPrice > oraclePrice8Decimals ?
-            tokenPrice - oraclePrice8Decimals : oraclePrice8Decimals - tokenPrice;
+        // Calculate percentage difference using cross-multiplication
+        // |scaledTokenPrice - scaledOraclePrice| / scaledOraclePrice < 0.001 (0.1%)
+        uint256 priceDiff = scaledTokenPrice > scaledOraclePrice ?
+            scaledTokenPrice - scaledOraclePrice : scaledOraclePrice - scaledTokenPrice;
 
         // Allow 0.1% deviation (slippage tolerance)
-        // If this fails, check: Oracle price vs Submitted price
-        if (priceDiff > (oraclePrice8Decimals * 1) / 1000) {
+        if (priceDiff * 1000 > scaledOraclePrice) {
             revert(string(abi.encodePacked(
-                "Price deviation >0.1%: Oracle=",
-                Strings.toString(oraclePrice8Decimals),
-                " Submitted=",
-                Strings.toString(tokenPrice),
-                " Diff=",
-                Strings.toString(priceDiff * 100 / oraclePrice8Decimals),
+                "Price deviation >0.1%: Diff=",
+                Strings.toString(priceDiff * 100 / scaledOraclePrice),
                 "%"
             )));
         }
 
-        uint256 usdcAmount = (tokenAmount * tokenPrice * (10 ** USDC_DECIMALS)) /
+        // Now normalize oracle price to 8 decimals for final calculation
+        // Multiply first, then divide to preserve precision
+        uint256 oraclePrice8Decimals;
+        if (pythPrice.expo >= 0) {
+            oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * PRICE_PRECISION;
+        } else {
+            uint32 absExpo = uint32(-pythPrice.expo);
+            // For calculation, multiply first then divide to preserve precision
+            oraclePrice8Decimals = (uint256(uint64(pythPrice.price)) * PRICE_PRECISION) / (10 ** absExpo);
+        }
+
+        // Use fresh oracle price for calculation, not user-provided tokenPrice
+        uint256 usdcAmount = (tokenAmount * oraclePrice8Decimals * (10 ** USDC_DECIMALS)) /
                            ((10 ** TOKEN_DECIMALS) * PRICE_PRECISION);
 
         require(
@@ -246,6 +286,64 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
         bytes32 oldFeedId = tokenPriceFeedId;
         tokenPriceFeedId = _newPriceFeedId;
         emit PriceFeedUpdated(oldFeedId, _newPriceFeedId);
+    }
+
+    function requestWithdrawal(address token, uint256 amount) external onlyOwner returns (bytes32) {
+        require(amount > 0, "Amount must be positive");
+
+        if (token == address(0)) {
+            require(address(this).balance >= amount, "Insufficient ETH balance");
+        } else {
+            require(
+                usdcToken.balanceOf(address(this)) >= amount,
+                "Insufficient token balance"
+            );
+        }
+
+        bytes32 withdrawalId = keccak256(abi.encodePacked(token, amount, block.timestamp, owner()));
+        uint256 unlockTime = block.timestamp + WITHDRAWAL_DELAY;
+
+        pendingWithdrawals[withdrawalId] = PendingWithdrawal({
+            token: token,
+            amount: amount,
+            unlockTime: unlockTime,
+            exists: true
+        });
+
+        emit WithdrawalRequested(withdrawalId, token, amount, unlockTime);
+        return withdrawalId;
+    }
+
+    function executeWithdrawal(bytes32 withdrawalId) external onlyOwner {
+        PendingWithdrawal memory withdrawal = pendingWithdrawals[withdrawalId];
+
+        require(withdrawal.exists, "Withdrawal does not exist");
+        require(block.timestamp >= withdrawal.unlockTime, "Timelock has not expired");
+
+        delete pendingWithdrawals[withdrawalId];
+
+        if (withdrawal.token == address(0)) {
+            require(address(this).balance >= withdrawal.amount, "Insufficient ETH balance");
+            payable(owner()).transfer(withdrawal.amount);
+        } else {
+            require(
+                usdcToken.balanceOf(address(this)) >= withdrawal.amount,
+                "Insufficient token balance"
+            );
+            require(
+                usdcToken.transfer(owner(), withdrawal.amount),
+                "Token transfer failed"
+            );
+        }
+
+        emit WithdrawalExecuted(withdrawalId, withdrawal.token, withdrawal.amount);
+    }
+
+    function cancelWithdrawal(bytes32 withdrawalId) external onlyOwner {
+        require(pendingWithdrawals[withdrawalId].exists, "Withdrawal does not exist");
+
+        delete pendingWithdrawals[withdrawalId];
+        emit WithdrawalCancelled(withdrawalId);
     }
 
     function withdrawUSDC(uint256 amount) external onlyOwner {
