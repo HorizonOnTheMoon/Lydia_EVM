@@ -85,7 +85,6 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
     ) {
         require(!usedNonces[nonce], "Nonce already used");
 
-        // Include function selector for domain separation
         bytes32 messageHash = keccak256(
             abi.encodePacked(
                 "\x19Ethereum Signed Message:\n32",
@@ -113,38 +112,26 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
         uint256 fee = pythContract.getUpdateFee(priceUpdateData);
         require(msg.value >= fee, "Insufficient fee for price update");
 
-        // Update price feeds to ensure fresh oracle price
         pythContract.updatePriceFeeds{value: fee}(priceUpdateData);
 
-        // Use getPrice to ensure fresh price (will revert if stale)
         PythStructs.Price memory pythPrice = pythContract.getPrice(tokenPriceFeedId);
         require(pythPrice.price > 0, "Invalid price from oracle");
-
-        // Use cross-multiplication for slippage check to avoid precision loss
-        // Instead of normalizing both to 8 decimals and comparing, we compare:
-        // tokenPrice (8 decimals) vs pythPrice.price (with expo)
-        // Cross-multiply: tokenPrice * 10^(-expo) vs pythPrice.price * PRICE_PRECISION
 
         uint256 scaledTokenPrice;
         uint256 scaledOraclePrice;
 
         if (pythPrice.expo >= 0) {
-            // Oracle price needs to be scaled up
             scaledOraclePrice = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * PRICE_PRECISION;
             scaledTokenPrice = tokenPrice;
         } else {
             uint32 absExpo = uint32(-pythPrice.expo);
-            // Scale both to same denominator to avoid division
             scaledOraclePrice = uint256(uint64(pythPrice.price)) * PRICE_PRECISION;
             scaledTokenPrice = tokenPrice * (10 ** absExpo);
         }
 
-        // Calculate percentage difference using cross-multiplication
-        // |scaledTokenPrice - scaledOraclePrice| / scaledOraclePrice < 0.001 (0.1%)
         uint256 priceDiff = scaledTokenPrice > scaledOraclePrice ?
             scaledTokenPrice - scaledOraclePrice : scaledOraclePrice - scaledTokenPrice;
 
-        // Allow 0.1% deviation (slippage tolerance)
         if (priceDiff * 1000 > scaledOraclePrice) {
             revert(string(abi.encodePacked(
                 "Price deviation >0.1%: Diff=",
@@ -153,14 +140,11 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
             )));
         }
 
-        // Now normalize oracle price to 8 decimals for final calculation
-        // Multiply first, then divide to preserve precision
         uint256 oraclePrice8Decimals;
         if (pythPrice.expo >= 0) {
             oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * PRICE_PRECISION;
         } else {
             uint32 absExpo = uint32(-pythPrice.expo);
-            // For calculation, multiply first then divide to preserve precision
             oraclePrice8Decimals = (uint256(uint64(pythPrice.price)) * PRICE_PRECISION) / (10 ** absExpo);
         }
 
@@ -169,7 +153,6 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
             "USDC transfer failed"
         );
 
-        // Use fresh oracle price for calculation, not user-provided tokenPrice
         uint256 tokenAmount = (usdcAmount * (10 ** TOKEN_DECIMALS) * PRICE_PRECISION) /
                              (oraclePrice8Decimals * (10 ** USDC_DECIMALS));
 
@@ -196,38 +179,26 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
         uint256 fee = pythContract.getUpdateFee(priceUpdateData);
         require(msg.value >= fee, "Insufficient fee for price update");
 
-        // Update price feeds to ensure fresh oracle price
         pythContract.updatePriceFeeds{value: fee}(priceUpdateData);
 
-        // Use getPrice to ensure fresh price (will revert if stale)
         PythStructs.Price memory pythPrice = pythContract.getPrice(tokenPriceFeedId);
         require(pythPrice.price > 0, "Invalid price from oracle");
-
-        // Use cross-multiplication for slippage check to avoid precision loss
-        // Instead of normalizing both to 8 decimals and comparing, we compare:
-        // tokenPrice (8 decimals) vs pythPrice.price (with expo)
-        // Cross-multiply: tokenPrice * 10^(-expo) vs pythPrice.price * PRICE_PRECISION
 
         uint256 scaledTokenPrice;
         uint256 scaledOraclePrice;
 
         if (pythPrice.expo >= 0) {
-            // Oracle price needs to be scaled up
             scaledOraclePrice = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * PRICE_PRECISION;
             scaledTokenPrice = tokenPrice;
         } else {
             uint32 absExpo = uint32(-pythPrice.expo);
-            // Scale both to same denominator to avoid division
             scaledOraclePrice = uint256(uint64(pythPrice.price)) * PRICE_PRECISION;
             scaledTokenPrice = tokenPrice * (10 ** absExpo);
         }
 
-        // Calculate percentage difference using cross-multiplication
-        // |scaledTokenPrice - scaledOraclePrice| / scaledOraclePrice < 0.001 (0.1%)
         uint256 priceDiff = scaledTokenPrice > scaledOraclePrice ?
             scaledTokenPrice - scaledOraclePrice : scaledOraclePrice - scaledTokenPrice;
 
-        // Allow 0.1% deviation (slippage tolerance)
         if (priceDiff * 1000 > scaledOraclePrice) {
             revert(string(abi.encodePacked(
                 "Price deviation >0.1%: Diff=",
@@ -236,18 +207,14 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
             )));
         }
 
-        // Now normalize oracle price to 8 decimals for final calculation
-        // Multiply first, then divide to preserve precision
         uint256 oraclePrice8Decimals;
         if (pythPrice.expo >= 0) {
             oraclePrice8Decimals = uint256(uint64(pythPrice.price)) * (10 ** uint32(pythPrice.expo)) * PRICE_PRECISION;
         } else {
             uint32 absExpo = uint32(-pythPrice.expo);
-            // For calculation, multiply first then divide to preserve precision
             oraclePrice8Decimals = (uint256(uint64(pythPrice.price)) * PRICE_PRECISION) / (10 ** absExpo);
         }
 
-        // Use fresh oracle price for calculation, not user-provided tokenPrice
         uint256 usdcAmount = (tokenAmount * oraclePrice8Decimals * (10 ** USDC_DECIMALS)) /
                            ((10 ** TOKEN_DECIMALS) * PRICE_PRECISION);
 
