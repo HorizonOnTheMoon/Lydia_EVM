@@ -313,23 +313,6 @@ contract LydiaSpotToken is ERC20, Ownable, ReentrancyGuard {
         emit WithdrawalCancelled(withdrawalId);
     }
 
-    function withdrawUSDC(uint256 amount) external onlyOwner {
-        require(
-            usdcToken.balanceOf(address(this)) >= amount,
-            "Insufficient USDC balance"
-        );
-        require(
-            usdcToken.transfer(owner(), amount),
-            "USDC transfer failed"
-        );
-    }
-
-    function withdrawETH() external onlyOwner {
-        uint256 balance = address(this).balance;
-        require(balance > 0, "No ETH to withdraw");
-        payable(owner()).transfer(balance);
-    }
-
     function getContractUSDCBalance() external view returns (uint256) {
         return usdcToken.balanceOf(address(this));
     }
